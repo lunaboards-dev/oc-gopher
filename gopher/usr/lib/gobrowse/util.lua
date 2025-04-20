@@ -30,4 +30,12 @@ function util.replace_tab(str)
 	return (str:gsub("\t", "§"))
 end
 
+function util.explode(str, cap)
+	local matches = {}
+	for m in str:gmatch(cap) do
+		table.insert(matches, m)
+	end
+	return matches
+end
+
 return util
