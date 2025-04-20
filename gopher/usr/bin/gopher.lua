@@ -21,12 +21,6 @@ local hooked_funcs = {}
 local events = {}
 
 local brow = browser.new("gopher")
-local function err_handler(err)
-	--[[brow:clear()
-	io.stderr:write("Internal Lua error\n"..debug.traceback(err):gsub("\t", "  "))
-	brow.quit = true]]
-	brow:internal_error("Internal Lua error", debug.traceback(err):gsub("\t", "  "))
-end
 
 function events.key_down(_, key, code)
 	brow:key_down(key, code)
@@ -40,14 +34,16 @@ xpcall(function()
 		term.clear()
 	end
 	brow:draw()
-end, err_handler)
+end, brow.err_handler)
 while not brow.quit do
-	local rtv = table.pack(computer.pullSignal(gopher.min_sleep))
-	xpcall(function()
+	local rtv = table.pack(computer.pullSignal())
+	--[=[xpcall(function()
 		if rtv[1] and events[rtv[1]] then
 			events[rtv[1]](table.unpack(rtv, 2))
 			brow:draw()
 		end
 		--brow:draw()
-	end, err_handler)
+	end, err_handler)]=]
+
 end
+brow:close()

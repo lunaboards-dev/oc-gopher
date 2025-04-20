@@ -1,8 +1,75 @@
+local event = require("event")
 local has_mt, mt = pcall(require, "mtv2")
-local net = require("internet")
-local has_net = require("component").isAvailable("internet")
+--local net = require("internet")
+local component = require("component")
+local has_net = component.isAvailable("internet")
 
 local gopher = {}
+local sock = {}
+
+function sock:write(dat)
+	return self.sock.write(dat)
+end
+
+function sock:read(amt)
+	if #self.buffer == 0 and self.closed then return end
+	if amt == true then -- This looks dumb but, trust me, it's requried
+		local rdat = self.buffer
+		self.buffer = ""
+		return rdat
+	end
+	while #self.buffer < amt and not self.closed do
+		event.pull("buffer_filled")
+	end
+	--print("return")
+	local bsize = #self.buffer
+	local rdat = self.buffer:sub(1, math.min(bsize, amt))
+	self.buffer = self.buffer:sub(math.min(bsize, amt)+1)
+	return rdat
+end
+
+function sock:close()
+	if self.realclose then return end
+	self.realclose = true
+	self.closed = true
+	self.sock.close()
+	event.ignore("internet_ready", self.helper)
+end
+
+local function tcpopen(addr, port)
+	local s = {
+		sock = component.internet.connect(addr, port),
+		buffer = ""
+	}
+	function s.helper()
+		--print("ready")
+		while true do
+			local r = s.sock.read()
+			if not r then
+				s.closed = true
+				--print("closed")
+				break
+			end
+			s.buffer = s.buffer .. r
+			if #r == 0 then break end
+		end
+		event.push("buffer_filled")
+	end
+	event.listen("internet_ready", s.helper)
+	local ok, con
+	while not con do
+		ok, con = pcall(s.sock.finishConnect)
+		if not ok then
+			return nil, con
+		end
+		os.sleep(gopher.min_sleep)
+	end
+	s.helper()
+	setmetatable(s, {__index=sock})
+	table.insert(require("process").info().data.handles, s)
+	return s
+end
+
 gopher.min_sleep = 0.0001
 gopher.dont_strip_leading_slash = false
 
@@ -59,9 +126,13 @@ function gopher.req(url, hint)
 	if not p then return p, err end
 	local sock
 	if p.proto == "gopher" then
-		sock = net.open(p.host, p.port)
+		--sock = net.open(p.host, p.port)
+		sock, err = tcpopen(p.host, p.port)
 	elseif p.proto == "gomt" then
-		sock = mt.open(p.host, p.port)
+		sock, err = mt.open(p.host, p.port)
+	end
+	if not sock then
+		return sock, err
 	end
 	hint = hint or p.hint
 	sock:write(p.rsc.."\r\n")

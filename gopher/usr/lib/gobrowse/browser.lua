@@ -1,14 +1,24 @@
 local term = require("term")
 local utils = require("gobrowse.util")
 local gopher= require("gopher")
+local event = require("event")
+local thread = require("thread")
+local uptime = require("computer").uptime
 local browser = {}
 
 local function bit_depth()
 	return term.gpu().getDepth()
 end
 
+local spinner = {
+	"|",
+	"/",
+	"-",
+	"\\"
+}
+
 function browser.new(brow)
-	return setmetatable({
+	local rt = setmetatable({
 		browser = brow,
 		url = "Home",
 		history = {},
@@ -18,6 +28,74 @@ function browser.new(brow)
 		lcount = 2,
 		query = ""
 	}, {__index=browser})
+	local function timer()
+		local stat = "✔"
+		if rt.loading then
+			stat = " "..spinner[math.floor(os.clock()*5)%4+1]
+		end
+		rt:update_taskbar(stat)
+	end
+	--rt.timer = event.timer(0.1, timer, math.huge)
+	function rt.err_handler(err)
+		--[[brow:clear()
+		io.stderr:write("Internal Lua error\n"..debug.traceback(err):gsub("\t", "  "))
+		brow.quit = true]]
+		rt:internal_error("Internal Lua error", debug.traceback(err):gsub("\t", "  "))
+	end
+	rt.helpers = {}
+	function rt.helpers.key_down(_, _, key, code)
+		xpcall(function()
+			rt:key_down(key, code)
+			rt:draw()
+		end, rt.err_handler)
+	end
+	function rt.helpers.scroll(_, _, x, y, amt)
+		xpcall(function()
+			rt:scroll(x, y, amt)
+			rt:draw()
+		end, rt.err_handler)
+	end
+	for k, v in pairs(rt.helpers) do
+		event.listen(k, v)
+	end
+	table.insert(require("process").info().data.handles, rt)
+	-- Draw for the first time
+	rt:draw()
+	return rt
+end
+
+function browser:spinner()
+	local stat = "✔"
+	if self.loading then
+		stat = " "..spinner[math.floor(os.clock()*5)%4+1]
+	elseif self.error_state then
+		stat = "⚠"
+	end
+	return stat
+end
+
+function browser:draw_spinner()
+	local w, h = term.getViewport()
+	local x, y = term.getCursor()
+	term.setCursor(1, h)
+	term.write(string.format("\27[47;30m%s\27[0m", self:spinner()))
+	term.setCursor(x, y)
+end
+
+function browser:termread(...)
+	self.ignore_keys = true
+	local dat, err = term.read(...)
+	self.ignore_keys = false
+	return dat, err
+end
+
+function browser:close()
+	if self.fullclosed then return end
+	self.fullclosed = true
+	for k, v in pairs(self.helpers) do
+		event.ignore(k, v)
+	end
+	--event.cancel(self.timer)
 end
 
 function browser:update_taskbar(status)
@@ -150,13 +228,6 @@ function browser:draw_menu()
 	end
 end
 
-local spinner = {
-	"|",
-	"/",
-	"-",
-	"\\"
-}
-
 function browser:reset()
 	term.write("\27[0m")
 end
@@ -194,6 +265,7 @@ function browser:recompute_links()
 end
 
 function browser:draw()
+	if self.ignore_keys then return end
 	if self.state == "menu" then
 		self:draw_menu()
 	elseif self.state == "text" then
@@ -201,10 +273,7 @@ function browser:draw()
 	elseif self.state == "history" then
 		self:display_history()
 	end
-	local stat = "✔"
-	if self.loading then
-		stat = " "..spinner[math.floor(os.clock()*2)%4+1]
-	end
+	local stat = self:spinner()
 	self:update_taskbar(stat)
 end
 
@@ -222,8 +291,8 @@ function browser:menubar_prompt(text, history)
 	term.setCursor(1, vh)
 	term.write("\27[47;30m")
 	term.clearLine()
-	term.write(text..": ")
-	local rtv = term.read(h)
+	term.write(string.format("%s %s: ", self:spinner(), text))
+	local rtv = self:termread(h)--term.read(h)
 	if rtv then
 		rtv = rtv:gsub("\n$", "")
 	end
@@ -237,6 +306,7 @@ local function format_url(url)
 end
 
 function browser:internal_error(err, text)
+	self.error_state = true
 	if self.texterror then
 		self.textlines = "Critial error! "..err.."\n"..string.rep("-", term.getViewport()).."\n"..text
 		self.state = "text"
@@ -258,6 +328,7 @@ local proto_checks = {
 
 function browser:navigate(url, nopush)
 	local err
+	self.error_state = false
 	self.textlines = ""
 	if not nopush and self.url ~= "Home" then
 		self:push_history({
@@ -281,25 +352,41 @@ function browser:navigate(url, nopush)
 		return
 	end
 	self.loading = true
-	local res, file, buffer = gopher.req(url)
-	if not res then
-		self:internal_error("Connection error", file)
-	elseif type(res) == "string" then
-		self.state = "text"
-		self.textlines = res
-	elseif file then
-		self.state = "text"
-		self.textlines = "Download file "..format_url(url).."?\nCtrl-C to cancel."
-		self.loading = false
-		self:draw()
-		local savepath = self:menubar_prompt("Save path")
-		if savepath then
-			self:download_file(res, buffer, savepath)
+	local ready
+	self.loader = thread.create(function()
+		xpcall(function()
+			local res, file, buffer = gopher.req(url)
+			if not res then
+				self:internal_error("Connection error", file)
+			elseif type(res) == "string" then
+				self.state = "text"
+				self.textlines = res
+			elseif file then
+				self.state = "text"
+				self.textlines = "Download file "..format_url(url).."?\nCtrl-C to cancel."
+				self.loading = false
+				self:draw()
+				local savepath = self:menubar_prompt("Save path")
+				if savepath then
+					self.loading = true
+					self:download_file(res, buffer, savepath)
+					self.loading = false
+				end
+			else
+				self.state = "menu"
+				self.lines = res
+				self:recompute_links()
+			end
+			ready = true
+		end, self.err_handler)
+	end)
+	local last_draw = uptime()
+	while not ready and not self.quit do
+		if uptime()-last_draw > 0.2 then
+			last_draw = uptime()
+			self:draw_spinner()
+			os.sleep(gopher.min_sleep)
 		end
-	else
-		self.state = "menu"
-		self.lines = res
-		self:recompute_links()
 	end
 	self.url = format_url(url)
 	self.url_tbl = url
@@ -315,7 +402,7 @@ function browser:key_down(key, scancode)
 	local vh = h-1
 	local c = string.char(key)
 	local skey = codes[scancode]
-
+	if self.ignore_keys then return end
 	if c == "q" then -- Quit
 		self.quit = true
 	elseif c == "g" then -- Goto
@@ -391,7 +478,7 @@ function browser:key_down(key, scancode)
 			}
 			if link.type == "7" then
 				draw_search(self.selected-self.offset, link.display, "", true, w)
-				local query = term.read {
+				local query = self:termread {--term.read {
 					nowrap = true,
 					dobreak = false,
 					#self.query > 0 and self.query or nil
