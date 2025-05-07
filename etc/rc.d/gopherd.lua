@@ -1,6 +1,7 @@
 local mt = require("minitel")
 local thread = require("thread")
 local fs = require("filesystem")
+local event = require("event")
 local coros = {}
 
 local cfg = {
@@ -110,8 +111,10 @@ function start()
 	l = mt.flisten(70, function(sock)
 		table.insert(coros, thread.create(handle_connection, sock))
 	end)
+	event.push("dans_add_service", "minitel", cfg.port, "web/gopher", "gopher server")
 end
 
 function stop()
 	require("event").ignore("net_msg", l)
+	event.push("dans_add_service", "minitel", cfg.port, "web/gopher", "gopher server")
 end
