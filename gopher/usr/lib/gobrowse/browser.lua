@@ -3,8 +3,13 @@ local utils = require("gobrowse.util")
 local gopher= require("gopher")
 local event = require("event")
 local thread = require("thread")
+local fs = require("filesystem")
+local builder = require("gobrowse.pagebuild")
+local ser = require("serialization")
 local uptime = require("computer").uptime
-local browser = {}
+local browser = {
+	internal = {}
+}
 
 local function bit_depth()
 	return term.gpu().getDepth()
@@ -28,6 +33,8 @@ function browser.new(brow)
 		lcount = 2,
 		query = ""
 	}, {__index=browser})
+	rt:load_bookmarks()
+	rt:navigate("about://home")
 	local function timer()
 		local stat = "✔"
 		if rt.loading then
@@ -160,7 +167,7 @@ local function draw_search(y, str, query, selected, w)
 end
 
 function browser:draw_text()
-	local lines = utils.explode(self.textlines, "[^\n]*")
+	local lines = utils.explode(self.textlines, "[^\n]+")
 	local w, h = term.getViewport()
 	local vh = h-1
 	for i=1, vh do
@@ -168,6 +175,15 @@ function browser:draw_text()
 		rewrite_line(i, lines[ri] or "")
 	end
 end
+
+local settings = {
+	buttongrp = {},
+	text = {},
+	number = {},
+	checkbox = {},
+	bookmark = {},
+	history = {}
+}
 
 local etypes = {
 	["0"] = "📝",
@@ -194,7 +210,13 @@ local etypes = {
 	r = "RTF",
 	s = "SND",
 	P = "PDF",
-	X = "XML"
+	X = "XML",
+	[settings.bookmark] = "★",
+	[settings.text] = "🔧",
+	[settings.number] = "🔧",
+	[settings.checkbox] = "🔧",
+	[settings.history] = "←"
+	--[settings.bookmark] = "🔧",
 }
 
 local cant_navigate = {
@@ -226,6 +248,97 @@ function browser:draw_menu()
 			draw_link(i, etypes[ent.type], txt, sel, 36, w)
 		end
 	end
+end
+
+function browser:handle_internal(page)
+	local pg = page:match("about://([^%?\t]+)")
+	local arg = page:match("[%?\t](.+)")
+	if browser.internal[pg] then
+		local mode, data = browser.internal[pg](self, arg)
+		self.state = mode
+		if mode == "menu" then
+			self.lines = data
+			self:recompute_links()
+		elseif mode == "text" then
+			self.textlines = data
+		end
+	end
+	return {
+		proto = "about",
+		host = pg,
+		port = 70,
+		rsc = "",
+		hint = self.mode == "menu" and "1" or "0"
+	}
+end
+
+function browser.internal:home(arg)
+	local page = builder()
+	page:print("Welcome to "..self.browser.."!")
+	page:print("Controls:")
+	page:print("    G: Open navigation prompt.")
+	page:print("    H: Open history.")
+	page:print("    K: Add/remove a bookmark.")
+	page:print("    B: Open bookmarks.")
+	page:print("    Q: Quit.")
+	page:print("    ←: Back.")
+	page:print("  →/↵: Follow link.")
+	page:add("7", "Search Veronica-2", "v2/vs", "gopher.floodgap.com", 70)
+	return "menu", page
+end
+
+function browser.internal:bookmarks(arg)
+	local page = builder()
+	page:print(string.format("Bookmarks (%d):", #self.bookmarks))
+	for i=1, #self.bookmarks do
+		local bm = self.bookmarks[i]
+		page:add(settings.bookmark, bm.name, nil, nil, nil, bm)
+	end
+	return "menu", page
+end
+
+function browser.internal:history(arg)
+	local page = builder()
+	for i=#self.history, 1, -1 do
+		local h = self.history[i]
+		page:add(settings.history, h.display, nil, nil, nil, h)
+	end
+	return "menu", page
+end
+
+function browser.internal:config(arg)
+	local page = builder()
+	page:print("TODO: Add settings here.")
+	return "menu", page
+end
+
+function browser:load_bookmarks()
+	local bm_path = os.getenv("HOME").."/."..self.browser.."/bookmarks"
+	if fs.exists(bm_path) then
+		local f = io.open(bm_path, "r")
+		local dat = f:read("*a")
+		f:close()
+		self.bookmarks = ser.unserialize(dat)
+	else
+		self.bookmarks = {}
+	end
+end
+
+function browser:save_bookmarks()
+	local ddir = os.getenv("HOME").."/."..self.browser
+	if not fs.exists(ddir) then
+		fs.makeDirectory(ddir)
+	end
+	local bm_path = os.getenv("HOME").."/."..self.browser.."/bookmarks"
+	--[[if fs.exists(bm_path) then
+		local f = io.open(bm_path, "r")
+	else
+		self.bookmarks = {}
+	end]]
+	local dat = ser.serialize(self.bookmarks)
+	local f = io.open(bm_path, "w")
+	f:write(dat)
+	f:close()
 end
 
 function browser:reset()
@@ -323,7 +436,8 @@ end
 
 local proto_checks = {
 	gomt = {gopher.has_minitel, "Minitel", "Install Minitel and the mtv2 library"},
-	gopher = {gopher.has_internet, "Internet", "Install an internet card or contact your server admin."}
+	gopher = {gopher.has_internet, "Internet", "Install an internet card or contact your server admin."},
+	about = {function()return true end, "internal", "internal error"}
 }
 
 function browser:navigate(url, nopush)
@@ -340,54 +454,69 @@ function browser:navigate(url, nopush)
 		})
 	end
 	if type(url) == "string" then
+		if url:sub(1, 8) == "about://" then
+			url = self:handle_internal(url)
+			goto finished
+		end
 		url, err = gopher.parse_url(url)
 		if not url then
 			self:internal_error("URL parsing error", err)
 			return
 		end
 	end
-	local pc = proto_checks[url.proto]
-	if not pc or not pc[1]() then
-		self:internal_error("No connection ("..pc[2]..")", pc[3])
-		return
-	end
-	self.loading = true
-	local ready
-	self.loader = thread.create(function()
-		xpcall(function()
-			local res, file, buffer = gopher.req(url)
-			if not res then
-				self:internal_error("Connection error", file)
-			elseif type(res) == "string" then
-				self.state = "text"
-				self.textlines = res
-			elseif file then
-				self.state = "text"
-				self.textlines = "Download file "..format_url(url).."?\nCtrl-C to cancel."
-				self.loading = false
-				self:draw()
-				local savepath = self:menubar_prompt("Save path")
-				if savepath then
-					self.loading = true
-					self:download_file(res, buffer, savepath)
+	do
+		if url.proto == "about" then
+			url = self:handle_internal("about://"..url.host)
+			goto finished
+		end
+		local pc = proto_checks[url.proto]
+		if not pc or not pc[1]() then
+			self:internal_error("No connection ("..pc[2]..")", pc[3])
+			return
+		end
+		self.loading = true
+		local ready
+		if self.loader then
+			self.loader:kill()
+		end
+		self.loader = thread.create(function()
+			xpcall(function()
+				local res, file, buffer = gopher.req(url)
+				if not res then
+					self:internal_error("Connection error", file)
+				elseif type(res) == "string" then
+					self.state = "text"
+					self.textlines = res
+				elseif file then
+					self.state = "text"
+					self.textlines = "Download file "..format_url(url).."?\nCtrl-C to cancel."
 					self.loading = false
+					self:draw()
+					local savepath = self:menubar_prompt("Save path")
+					if savepath then
+						self.loading = true
+						self:download_file(res, buffer, savepath)
+						self.loading = false
+					end
+				else
+					self.state = "menu"
+					self.lines = res
+					self:recompute_links()
 				end
-			else
-				self.state = "menu"
-				self.lines = res
-				self:recompute_links()
+				ready = true
+				self.loader = nil
+			end, self.err_handler)
+		end)
+		local last_draw = uptime()
+		while not ready and not self.quit do
+			if uptime()-last_draw > 0.2 then
+				last_draw = uptime()
+				self:draw_spinner()
+				os.sleep(gopher.min_sleep)
 			end
-			ready = true
-		end, self.err_handler)
-	end)
-	local last_draw = uptime()
-	while not ready and not self.quit do
-		if uptime()-last_draw > 0.2 then
-			last_draw = uptime()
-			self:draw_spinner()
-			os.sleep(gopher.min_sleep)
 		end
 	end
+	::finished::
 	self.url = format_url(url)
 	self.url_tbl = url
 	self.loading = false
@@ -416,7 +545,30 @@ function browser:key_down(key, scancode)
 			self:navigate(res)
 		end
 	elseif c == "h" then -- History
-		self.state = "history"
+		--self.state = "history"
+		self:navigate("about://history", self.url_tbl.proto == "about" and self.url_tbl.host == "history")
+	elseif c == "b" then -- Bookmarks
+		self:navigate("about://bookmarks")
+	elseif c == "k" then
+		local link = self.lines[self.selected]
+		if link and link.type == settings.bookmark then
+			-- Remove bookmark
+			for i=1, #self.bookmarks do
+				if self.bookmarks[i] == link.extra then
+					table.remove(self.bookmarks, i)
+					break
+				end
+			end
+			self:save_bookmarks()
+			self:navigate("about://bookmarks", true)
+		elseif self.url_tbl.proto ~= "about" and self.url_tbl.host ~= "bookmarks" then
+			-- Add bookmark
+			local name = self:menubar_prompt("Bookmark Name", {})
+			if name then
+				table.insert(self.bookmarks, {name = name, url = self.url_tbl})
+				self:save_bookmarks()
+			end
+		end
 	elseif skey == "left" then -- Go back
 		local hist_ent = self:pop_history()
 		if hist_ent then
@@ -489,6 +641,18 @@ function browser:key_down(key, scancode)
 					self.query = query
 					self:navigate(url)
 				end
+			elseif link.type == settings.bookmark then
+				self:navigate(link.extra.url, true)
+			elseif link.type == settings.history then
+				local e
+				repeat
+					e = self:pop_history()
+					if e == link.extra then
+						break
+					end
+				until not e
+				self:navigate(e.tbl, true)
+				self:nav_reset(e)
 			else
 				self:navigate(url)
 			end
@@ -498,8 +662,8 @@ function browser:key_down(key, scancode)
 	self.selected = self.selected or 0
 	if self.selected > 0 then
 		local off_sel = self.selected-self.offset
-		if off_sel < 0 then
-			self.offset = self.selected
+		if off_sel <= 0 then
+			self.offset = self.selected-1
 		elseif off_sel > vh then
 			self.offset = self.selected-vh
 		end

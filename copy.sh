@@ -6,3 +6,4 @@ cp gopher/usr/lib/gopher.lua "$DISKROOT/usr/lib/gopher.lua"
 
 cp gopher/usr/lib/gobrowse/browser.lua "$DISKROOT/usr/lib/gobrowse/browser.lua"
 cp gopher/usr/lib/gobrowse/util.lua "$DISKROOT/usr/lib/gobrowse/util.lua"
+cp gopher/usr/lib/gobrowse/pagebuild.lua "$DISKROOT/usr/lib/gobrowse/pagebuild.lua"

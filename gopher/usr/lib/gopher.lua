@@ -19,6 +19,8 @@ function sock:read(amt)
 		return rdat
 	end
 	while #self.buffer < amt and not self.closed do
+		self.buffer_request = #self.buffer-amt
+		event.push("buffer_empty")
 		event.pull("buffer_filled")
 	end
 	--print("return")
@@ -34,6 +36,7 @@ function sock:close()
 	self.closed = true
 	self.sock.close()
 	event.ignore("internet_ready", self.helper)
+	event.ignore("buffer_empty", self.helper)
 end
 
 local function tcpopen(addr, port)
@@ -51,11 +54,15 @@ local function tcpopen(addr, port)
 				break
 			end
 			s.buffer = s.buffer .. r
+			if #s.buffer >= (s.buffer_request or 4096) then
+				break
+			end
 			if #r == 0 then break end
 		end
 		event.push("buffer_filled")
 	end
 	event.listen("internet_ready", s.helper)
+	event.listen("buffer_empty", s.helper)
 	local ok, con
 	while not con do
 		ok, con = pcall(s.sock.finishConnect)
@@ -78,33 +85,37 @@ local function minsleep()
 end
 
 function gopher.parse_url(url)
-	local proto = url:match("^(go%a+)://")
+	local proto = url:match("^(%a+)://")
 	if not proto then
 		proto = "gopher"
 	else
-		url = url:match("://(.+)$")
+		url = url:sub(#proto+4)--url:match("://(.+)$")
 	end
 	local port = url:match(":(%d+)/?")
 	local rsc, host
 	if port then
-		host = url:match("^([^:]+)")
+		host = url:match("^([^:/]+)")
 		port = tonumber(port, 10)
 		if not port then return nil, "unable to parse port" end
-		rsc = url:match("^[^/]+(.+)")
+		rsc = url:match("^[^/]+(/.+)")
 		if not rsc then
 			rsc = "/"
 		end
 	else
-		host, rsc = url:match("^([^/]+)(.+)")
+		host, rsc = url:match("^([^/]+)(/.+)")
+		if not host then
+			host = url
+			rsc = "/"
+		end
 		port = proto == "gomt" and 80 or 70
 	end
 	local hint
-	if rsc:match("/%d/") then
+	if rsc and rsc:match("/%d/") then
 		hint = rsc:sub(2,2)
 		rsc = rsc:sub(3)
 	end
-	if proto ~= "gopher" and proto ~= "gomt" then return nil, "bad protocol" end
-	if not gopher.dont_strip_leading_slash then
+	if proto ~= "gopher" and proto ~= "gomt" and proto ~= "about" then return nil, "bad protocol" end
+	if not gopher.dont_strip_leading_slash and rsc then
 		rsc = rsc:gsub("^/", "")
 	end
 	return {
