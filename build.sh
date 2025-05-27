@@ -20,7 +20,7 @@ find * | cpio -oF ../gopher-loot.cpio
 
 # Net release
 echo "net" > usr/lib/gobrowse/src.info
-find * | grep -v .prop | cpio -oF ../gopher-src.cpio
+find * | grep -v .prop | cpio -oF ../gopher-net.cpio
 
 # Basic CPIO
 echo "local" > usr/lib/gobrowse/src.info
