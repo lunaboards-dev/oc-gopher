@@ -18,8 +18,10 @@ function sock:read(amt)
 		self.buffer = ""
 		return rdat
 	end
+	--local req_buffer = #self.buffer-amt+1
+	self.buffer_request = amt
 	while #self.buffer < amt and not self.closed do
-		self.buffer_request = #self.buffer-amt
+		--self.buffer_request = req_buffer
 		event.push("buffer_empty")
 		event.pull("buffer_filled")
 	end
@@ -27,6 +29,7 @@ function sock:read(amt)
 	local bsize = #self.buffer
 	local rdat = self.buffer:sub(1, math.min(bsize, amt))
 	self.buffer = self.buffer:sub(math.min(bsize, amt)+1)
+	self.stat_read = (self.stat_read or 0) + #rdat
 	return rdat
 end
 
@@ -39,13 +42,19 @@ function sock:close()
 	event.ignore("buffer_empty", self.helper)
 end
 
-local function tcpopen(addr, port)
+local function tcpopen(addr, port, noinit)
 	local s = {
 		sock = component.internet.connect(addr, port),
-		buffer = ""
+		buffer = "",
+		stat_read = 0,
+		--buffer_request = 4096
 	}
 	function s.helper()
 		--print("ready")
+		if #s.buffer >= math.max(s.buffer_request or 4096, 4096) then
+			--event.push("buffer_filled")
+			return
+		end
 		while true do
 			local r = s.sock.read()
 			if not r then
@@ -54,7 +63,7 @@ local function tcpopen(addr, port)
 				break
 			end
 			s.buffer = s.buffer .. r
-			if #s.buffer >= (s.buffer_request or 4096) then
+			if #s.buffer >= math.max(s.buffer_request or 4096, 4096) then
 				break
 			end
 			if #r == 0 then break end
@@ -138,7 +147,7 @@ function gopher.req(url, hint)
 	local sock
 	if p.proto == "gopher" then
 		--sock = net.open(p.host, p.port)
-		sock, err = tcpopen(p.host, p.port)
+		sock, err = tcpopen(p.host, p.port, p.hint == "9")
 	elseif p.proto == "gomt" then
 		sock, err = mt.open(p.host, p.port)
 	end

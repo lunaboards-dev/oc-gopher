@@ -10,6 +10,7 @@ local uptime = require("computer").uptime
 local browser = {
 	internal = {}
 }
+browser.version = "1.0"
 
 local function bit_depth()
 	return term.gpu().getDepth()
@@ -24,7 +25,7 @@ local spinner = {
 
 function browser.new(brow)
 	local rt = setmetatable({
-		browser = brow,
+		browser = brow or "gopher",
 		url = "Home",
 		history = {},
 		state = "text",
@@ -59,6 +60,12 @@ function browser.new(brow)
 	function rt.helpers.scroll(_, _, x, y, amt)
 		xpcall(function()
 			rt:scroll(x, y, amt)
+			rt:draw()
+		end, rt.err_handler)
+	end
+	function rt.helpers.touch(_, _, x, y, button)
+		xpcall(function()
+			rt:touch(x, y)
 			rt:draw()
 		end, rt.err_handler)
 	end
@@ -182,7 +189,8 @@ local settings = {
 	number = {},
 	checkbox = {},
 	bookmark = {},
-	history = {}
+	history = {},
+	dlprogress = {}
 }
 
 local etypes = {
@@ -215,7 +223,8 @@ local etypes = {
 	[settings.text] = "🔧",
 	[settings.number] = "🔧",
 	[settings.checkbox] = "🔧",
-	[settings.history] = "←"
+	[settings.history] = "←",
+	[settings.dlprogress] = "⏳"
 	--[settings.bookmark] = "🔧",
 }
 
@@ -226,11 +235,40 @@ local cant_navigate = {
 	h = true
 }
 
+function browser:redraw_link(i, w, h)
+	local vh = h-1
+	local ri = i+self.offset
+	local sel = ri == self.selected
+	local ent = self.lines[ri]
+	local txt = utils.uclamp(ent and ent.display or "", w-3)
+	if not ent or not ent.type or ent.type == "+" then
+		rewrite_line(i, "")
+	elseif ent.type == "i" then
+		rewrite_line(i, "   "..txt)
+	elseif ent.type == "3" then
+		rewrite_line(i, string.format("%s %s", etypes["3"], txt))
+	elseif ent.type == "7" then
+		draw_search(i, ent.display, self.query, sel, w)
+	elseif cant_navigate[ent.type] then
+		draw_link(i, etypes[ent.type], txt, sel, 31, w)
+	elseif ent.type == settings.dlprogress then
+		local sock = ent.extra.sock
+		--draw_link(i, etypes[ent.type], string.format("%.1fK (%d bytes buffered)", sock.stat_read/1024, #sock.buffer), false, )
+		if not sock.realclose then
+			rewrite_line(i, string.format("%s %.1fK transfered", etypes[ent.type], sock.stat_read/1024, #sock.buffer))
+		else
+			rewrite_line(i, string.format("%s %.1fK transfered. Download complete!", etypes[ent.type], sock.stat_read/1024, #sock.buffer))
+		end
+	else
+		draw_link(i, etypes[ent.type], txt, sel, 36, w)
+	end
+end
+
 function browser:draw_menu()
 	local w, h = term.getViewport()
 	local vh = h-1
 	for i=1, vh do
-		local ri = i+self.offset
+		--[[local ri = i+self.offset
 		local sel = ri == self.selected
 		local ent = self.lines[ri]
 		local txt = utils.uclamp(ent and ent.display or "", w-3)
@@ -244,15 +282,16 @@ function browser:draw_menu()
 			draw_search(i, ent.display, self.query, sel, w)
 		elseif cant_navigate[ent.type] then
 			draw_link(i, etypes[ent.type], txt, sel, 31, w)
+		elseif ent.type == settings.dlprogress then
+			draw_link(i, )
 		else
 			draw_link(i, etypes[ent.type], txt, sel, 36, w)
-		end
+		end]]
+		self:redraw_link(i, w, h)
 	end
 end
 
-function browser:handle_internal(page)
-	local pg = page:match("about://([^%?\t]+)")
-	local arg = page:match("[%?\t](.+)")
+function browser:render_internal(pg, arg)
 	if browser.internal[pg] then
 		local mode, data = browser.internal[pg](self, arg)
 		self.state = mode
@@ -263,6 +302,22 @@ function browser:handle_internal(page)
 			self.textlines = data
 		end
 	end
+end
+
+function browser:handle_internal(page)
+	local pg = page:match("about://([^%?\t]+)")
+	local arg = page:match("[%?\t](.+)")
+	--[[if browser.internal[pg] then
+		local mode, data = browser.internal[pg](self, arg)
+		self.state = mode
+		if mode == "menu" then
+			self.lines = data
+			self:recompute_links()
+		elseif mode == "text" then
+			self.textlines = data
+		end
+	end]]
+	self:render_internal(pg, arg)
 	return {
 		proto = "about",
 		host = pg,
@@ -284,6 +339,8 @@ function browser.internal:home(arg)
 	page:print("    ←: Back.")
 	page:print("  →/↵: Follow link.")
 	page:add("7", "Search Veronica-2", "v2/vs", "gopher.floodgap.com", 70)
+	page:print("")
+	page:add("1", "About "..self.browser, "", "about://about")
 	return "menu", page
 end
 
@@ -312,12 +369,31 @@ function browser.internal:config(arg)
 	return "menu", page
 end
 
+local function readfile(path)
+	local f = io.open(path, "r")
+	local dat = f:read("*a")
+	f:close()
+	return dat
+end
+
+function browser.internal:about(arg)
+	local page = builder()
+	page:print(string.format("%s (version %s)", self.browser, browser.version))
+	page:print("Written by lunaboards-dev")
+	page:print("https://github.com/lunaboards-dev/oc-gopher")
+	page:print("Source: "..readfile("/usr/lib/gobrowse/src.info"))
+	page:print("")
+	local commits = readfile("/usr/lib/gobrowse/commit.info")
+	for line in commits:gmatch("[^\n]+") do
+		page:print(line)
+	end
+	return "menu", page
+end
+
 function browser:load_bookmarks()
 	local bm_path = os.getenv("HOME").."/."..self.browser.."/bookmarks"
 	if fs.exists(bm_path) then
-		local f = io.open(bm_path, "r")
-		local dat = f:read("*a")
-		f:close()
+		local dat = readfile(bm_path)
 		self.bookmarks = ser.unserialize(dat)
 	else
 		self.bookmarks = {}
@@ -418,6 +494,19 @@ local function format_url(url)
 	return string.format("%s://%s:%d/%s/%s", url.proto, url.host, url.port, url.hint, url.rsc:gsub("^/", ""))
 end
 
+function browser.internal:download(arg)
+	local page = builder()
+	page:print("Downloading file: "..format_url(arg.url))
+	if arg.sock then
+		page:add(settings.dlprogress, "", nil, nil, nil, {
+			sock = arg.sock
+		})
+	else
+		page:print("Ctrl-C to cancel")
+	end
+	return "menu", page
+end
+
 function browser:internal_error(err, text)
 	self.error_state = true
 	if self.texterror then
@@ -489,13 +578,20 @@ function browser:navigate(url, nopush)
 					self.textlines = res
 					url.hint = url.hint or "0"
 				elseif file then
-					self.state = "text"
-					self.textlines = "Download file "..format_url(url).."?\nCtrl-C to cancel."
+					--[[self.state = "text"
+					self.textlines = "Download file: "..format_url(url).."?\nCtrl-C to cancel."]]
+					self:render_internal("download", {
+						url = url
+					})
 					self.loading = false
 					url.hint = url.hint or "9"
 					self:draw()
 					local savepath = self:menubar_prompt("Save path")
 					if savepath then
+						self:render_internal("download", {
+							url = url,
+							sock = res
+						})
 						self.loading = true
 						self:download_file(res, buffer, savepath)
 						self.loading = false
@@ -518,6 +614,7 @@ function browser:navigate(url, nopush)
 				os.sleep(gopher.min_sleep)
 			end
 		end
+		if self.quit then return end
 	end
 	::finished::
 	self.url = format_url(url)
@@ -529,6 +626,55 @@ function browser:navigate(url, nopush)
 	self:clear()
 end
 
+function browser:select_link(idx)
+	local w, h = term.getViewport()
+	local link = self.lines[idx]
+	if not link then return end
+	local host = link.host
+	local url, proto
+	if not host then goto continue end
+	proto = host:match("(.-)://")
+	if proto then
+		host = host:match("://(.+)")
+	end
+	url = {
+		proto = proto or self.lines.proto or "gopher",
+		host = host,
+		port = link.port,
+		rsc = link.rsc,
+		hint = link.type
+	}
+	if link.type == "7" then
+		draw_search(self.selected-self.offset, link.display, "", true, w)
+		local query = self:termread {--term.read {
+			nowrap = true,
+			dobreak = false,
+			#self.query > 0 and self.query or nil
+		}
+		if query then
+			query = query:gsub("\n$", "")
+			url.rsc = url.rsc.."\t"..query
+			self.query = query
+			self:navigate(url)
+		end
+	elseif link.type == settings.bookmark then
+		self:navigate(link.extra.url, true)
+	elseif link.type == settings.history then
+		local e
+		repeat
+			e = self:pop_history()
+			if e == link.extra then
+				break
+			end
+		until not e
+		self:navigate(e.tbl, true)
+		self:nav_reset(e)
+	else
+		self:navigate(url)
+	end
+	::continue::
+end
+
 function browser:key_down(key, scancode)
 	local w, h = term.getViewport()
 	local vh = h-1
@@ -536,7 +682,9 @@ function browser:key_down(key, scancode)
 	local skey = codes[scancode]
 	if self.ignore_keys then return end
 	if c == "q" then -- Quit
-		self.quit = true
+		self:exit()
+	elseif c == "r" then
+		self:navigate(self.url_tbl, true)
 	elseif c == "g" then -- Goto
 		local history = {}
 		for i=1, #self.history do
@@ -616,50 +764,7 @@ function browser:key_down(key, scancode)
 			self.selected = self.links[#self.links] or 0
 			::found::
 		elseif skey == "right" or key == 13 then
-			local link = self.lines[self.selected]
-			local host = link.host
-			local url, proto
-			if not host then goto continue end
-			proto = host:match("(.-)://")
-			if proto then
-				host = host:match("://(.+)")
-			end
-			url = {
-				proto = proto or self.lines.proto or "gopher",
-				host = host,
-				port = link.port,
-				rsc = link.rsc,
-				hint = link.type
-			}
-			if link.type == "7" then
-				draw_search(self.selected-self.offset, link.display, "", true, w)
-				local query = self:termread {--term.read {
-					nowrap = true,
-					dobreak = false,
-					#self.query > 0 and self.query or nil
-				}
-				if query then
-					query = query:gsub("\n$", "")
-					url.rsc = url.rsc.."\t"..query
-					self.query = query
-					self:navigate(url)
-				end
-			elseif link.type == settings.bookmark then
-				self:navigate(link.extra.url, true)
-			elseif link.type == settings.history then
-				local e
-				repeat
-					e = self:pop_history()
-					if e == link.extra then
-						break
-					end
-				until not e
-				self:navigate(e.tbl, true)
-				self:nav_reset(e)
-			else
-				self:navigate(url)
-			end
-			::continue::
+			self:select_link(self.selected)
 		end
 	end
 	self.selected = self.selected or 0
@@ -696,13 +801,16 @@ function browser:touch(x, y)
 	local line = self.lines[ry]
 	if line and line.type and line.display then
 		if x > 3 and x < 3+utf8.len(line.display) then
-			
+			--self.selected = ry
+			self:select_link(ry)
 		end
 	end
 end
 
 function browser:download_file(con, buffer, path)
 	local of, err = io.open(path, "w")
+	local w, h = term.getViewport()
+	local vh = h-1
 	if not of then
 		self:internal_error("Failed to write file", err)
 	end
@@ -711,10 +819,29 @@ function browser:download_file(con, buffer, path)
 		local c = con:read(4096)
 		if not c then break end
 		of:write(c)
+		for i=1, vh do
+			local ri = i+self.offset
+			local ent = self.lines[ri]
+			if not ent then break end
+			if ent.type == settings.dlprogress then
+				self:redraw_link(i, w, h)
+			end
+		end
 	end
 	of:close()
 	con:close()
-	self.textlines = self.textlines.."\nSaved!"
+	--self.textlines = self.textlines.."\nSaved!"
+	table.insert(self.lines, {
+		type = "i",
+		display = "Saved!"
+	})
+end
+
+function browser:exit()
+	self.quit = true
+	if self.loader then
+		self.loader:kill()
+	end
 end
 
 return browser
