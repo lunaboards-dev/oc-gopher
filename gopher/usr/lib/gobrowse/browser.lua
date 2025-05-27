@@ -415,7 +415,7 @@ function browser:menubar_prompt(text, history)
 end
 
 local function format_url(url)
-	return string.format("%s://%s:%d/%s/%s", url.proto, url.host, url.port, url.hint, url.rsc)
+	return string.format("%s://%s:%d/%s/%s", url.proto, url.host, url.port, url.hint, url.rsc:gsub("^/", ""))
 end
 
 function browser:internal_error(err, text)
@@ -487,10 +487,12 @@ function browser:navigate(url, nopush)
 				elseif type(res) == "string" then
 					self.state = "text"
 					self.textlines = res
+					url.hint = url.hint or "0"
 				elseif file then
 					self.state = "text"
 					self.textlines = "Download file "..format_url(url).."?\nCtrl-C to cancel."
 					self.loading = false
+					url.hint = url.hint or "9"
 					self:draw()
 					local savepath = self:menubar_prompt("Save path")
 					if savepath then
@@ -501,6 +503,7 @@ function browser:navigate(url, nopush)
 				else
 					self.state = "menu"
 					self.lines = res
+					url.hint = url.hint or "1"
 					self:recompute_links()
 				end
 				ready = true
